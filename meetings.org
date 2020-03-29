@@ -1,0 +1,8 @@
+* <2020-03-29 Sun>
+** Tasks for the next meet.
+- KK: get mat-mat, convolution running on CPUs
+- Ben: getting used to loop, linalg, affine dialect
+- Both: understanding the mlir workflow
+  - how do passes/analyses get applied
+    - are they dependent on the dialect we choose? 
+- Email on April 1, updating the status.
