@@ -116,7 +116,7 @@ parseEnumStrAttr(EnumClass &value, OpAsmParser &parser,
            << attrName << " attribute specified as string";
   }
   auto attrOptional =
-      spirv::symbolizeEnum<EnumClass>()(attrVal.cast<StringAttr>().getValue());
+      spirv::symbolizeEnum<EnumClass>(attrVal.cast<StringAttr>().getValue());
   if (!attrOptional) {
     return parser.emitError(loc, "invalid ")
            << attrName << " attribute specification: " << attrVal;
@@ -151,7 +151,7 @@ parseEnumKeywordAttr(EnumClass &value, OpAsmParser &parser,
   auto loc = parser.getCurrentLocation();
   if (parser.parseKeyword(&keyword))
     return failure();
-  if (Optional<EnumClass> attr = spirv::symbolizeEnum<EnumClass>()(keyword)) {
+  if (Optional<EnumClass> attr = spirv::symbolizeEnum<EnumClass>(keyword)) {
     value = attr.getValue();
     return success();
   }
@@ -1373,7 +1373,7 @@ static LogicalResult verify(spirv::ConstantOp constOp) {
 
 bool spirv::ConstantOp::isBuildableWith(Type type) {
   // Must be valid SPIR-V type first.
-  if (!SPIRVDialect::isValidType(type))
+  if (!type.isa<spirv::SPIRVType>())
     return false;
 
   if (type.getKind() >= Type::FIRST_SPIRV_TYPE &&
@@ -2076,7 +2076,7 @@ void spirv::LoopOp::addEntryAndMergeBlock() {
   body().push_back(new Block());
   auto *mergeBlock = new Block();
   body().push_back(mergeBlock);
-  OpBuilder builder(mergeBlock);
+  OpBuilder builder = OpBuilder::atBlockEnd(mergeBlock);
 
   // Add a spv._merge op into the merge block.
   builder.create<spirv::MergeOp>(getLoc());
@@ -2373,7 +2373,7 @@ void spirv::SelectionOp::addMergeBlock() {
   assert(body().empty() && "entry and merge block already exist");
   auto *mergeBlock = new Block();
   body().push_back(mergeBlock);
-  OpBuilder builder(mergeBlock);
+  OpBuilder builder = OpBuilder::atBlockEnd(mergeBlock);
 
   // Add a spv._merge op into the merge block.
   builder.create<spirv::MergeOp>(getLoc());
@@ -2460,7 +2460,7 @@ static LogicalResult verify(spirv::SpecConstantOp constOp) {
   case StandardAttributes::Integer:
   case StandardAttributes::Float: {
     // Make sure bitwidth is allowed.
-    if (!spirv::SPIRVDialect::isValidType(value.getType()))
+    if (!value.getType().isa<spirv::SPIRVType>())
       return constOp.emitOpError("default value bitwidth disallowed");
     return success();
   }
@@ -2533,7 +2533,7 @@ static LogicalResult verify(spirv::UnreachableOp unreachableOp) {
   if (block->hasNoPredecessors())
     return success();
 
-  // TODO(antiagainst): further verification needs to analyze reachablility from
+  // TODO(antiagainst): further verification needs to analyze reachability from
   // the entry block.
 
   return success();

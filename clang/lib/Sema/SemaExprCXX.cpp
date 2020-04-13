@@ -4692,7 +4692,7 @@ static bool EvaluateUnaryTypeTrait(Sema &Self, TypeTrait UTT,
   case UTT_IsArray:
     return T->isArrayType();
   case UTT_IsPointer:
-    return T->isPointerType();
+    return T->isAnyPointerType();
   case UTT_IsLvalueReference:
     return T->isLValueReferenceType();
   case UTT_IsRvalueReference:
@@ -6850,6 +6850,9 @@ ExprResult Sema::MaybeBindToTemporary(Expr *E) {
     return ImplicitCastExpr::Create(Context, E->getType(), ck, E, nullptr,
                                     VK_RValue);
   }
+
+  if (E->getType().isDestructedType() == QualType::DK_nontrivial_c_struct)
+    Cleanup.setExprNeedsCleanups(true);
 
   if (!getLangOpts().CPlusPlus)
     return E;

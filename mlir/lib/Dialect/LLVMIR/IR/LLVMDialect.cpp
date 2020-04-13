@@ -102,7 +102,8 @@ static ParseResult parseCmpOp(OpAsmParser &parser, OperationState &result) {
     return parser.emitError(trailingTypeLoc, "expected LLVM IR dialect type");
   if (argType.getUnderlyingType()->isVectorTy())
     resultType = LLVMType::getVectorTy(
-        resultType, argType.getUnderlyingType()->getVectorNumElements());
+        resultType, llvm::cast<llvm::VectorType>(argType.getUnderlyingType())
+                        ->getNumElements());
 
   result.addTypes({resultType});
   return success();
@@ -407,6 +408,11 @@ static ParseResult parseInvokeOp(OpAsmParser &parser, OperationState &result) {
 
 static LogicalResult verify(LandingpadOp op) {
   Value value;
+  if (LLVMFuncOp func = op.getParentOfType<LLVMFuncOp>()) {
+    if (!func.personality().hasValue())
+      return op.emitError(
+          "llvm.landingpad needs to be in a function with a personality");
+  }
 
   if (!op.cleanup() && op.getOperands().empty())
     return op.emitError("landingpad instruction expects at least one clause or "
@@ -1767,7 +1773,12 @@ bool LLVMType::isArrayTy() { return getUnderlyingType()->isArrayTy(); }
 
 /// Vector type utilities.
 LLVMType LLVMType::getVectorElementType() {
-  return get(getContext(), getUnderlyingType()->getVectorElementType());
+  return get(
+      getContext(),
+      llvm::cast<llvm::VectorType>(getUnderlyingType())->getElementType());
+}
+unsigned LLVMType::getVectorNumElements() {
+  return llvm::cast<llvm::VectorType>(getUnderlyingType())->getNumElements();
 }
 bool LLVMType::isVectorTy() { return getUnderlyingType()->isVectorTy(); }
 

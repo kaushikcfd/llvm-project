@@ -12,7 +12,7 @@
 
 #include <type_traits>
 
-#include "mlir/Dialect/AffineOps/AffineOps.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
 #include "mlir/Dialect/Vector/VectorOps.h"
@@ -29,7 +29,6 @@
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Types.h"
-#include "mlir/Support/Functional.h"
 #include "mlir/Support/STLExtras.h"
 
 #include "llvm/Support/CommandLine.h"
@@ -40,7 +39,6 @@
 
 using namespace mlir;
 using llvm::dbgs;
-using mlir::functional::zipMap;
 
 /// Given a shape with sizes greater than 0 along all dimensions,
 /// returns the distance, in number of elements, between a slice in a dimension
@@ -67,15 +65,6 @@ static int64_t computeMaxLinearIndex(ArrayRef<int64_t> basis) {
   for (auto b : basis)
     res *= b;
   return res;
-}
-
-/// Computes and returns the linearized index of 'offsets' w.r.t. 'basis'.
-static int64_t linearize(ArrayRef<int64_t> offsets, ArrayRef<int64_t> basis) {
-  assert(offsets.size() == basis.size());
-  int64_t linearIndex = 0;
-  for (unsigned idx = 0, e = basis.size(); idx < e; ++idx)
-    linearIndex += offsets[idx] * basis[idx];
-  return linearIndex;
 }
 
 // Clones `op` into a new operations that takes `operands` and returns
@@ -270,7 +259,7 @@ struct VectorState {
 //                           insertslice
 //                                |
 
-// TODO(andydavis) Add the following canonicalization/simplifcation patterns:
+// TODO(andydavis) Add the following canonicalization/simplification patterns:
 // *) Add pattern which matches InsertStridedSlice -> StridedSlice and forwards
 //    InsertStridedSlice operand to StridedSlice.
 // *) Add pattern which matches SourceOp -> StridedSlice -> UserOp which checks
@@ -683,6 +672,144 @@ struct ShapeCastOpDecomposer : public OpRewritePattern<vector::ShapeCastOp> {
   }
 };
 
+/// Returns the producer Value of the same type as 'consumerValue', by tracking
+/// the tuple index and offsets of the consumer vector value through the
+/// chain of operations (TupleGetOp, InsertSlicesOp, ExtractSlicesOp, TupleOp,
+/// and ShapeCastOp) from consumer to producer. Each operation in the chain is
+/// structured, and so the tuple index and offsets can be mapped from result to
+/// input, while visiting each operation in the chain.
+/// Returns nullptr on failure.
+static Value getProducerValue(Value consumerValue) {
+  auto consumerVectorType = consumerValue.getType().cast<VectorType>();
+  // A tupleIndex == -1 indicates that 'offsets' are w.r.t a vector type.
+  int64_t tupleIndex = -1;
+  SmallVector<int64_t, 4> offsets(consumerVectorType.getRank(), 0);
+  auto *op = consumerValue.getDefiningOp();
+  while (op != nullptr) {
+    if (auto tupleGetOp = dyn_cast<vector::TupleGetOp>(op)) {
+      assert(tupleIndex == -1 && "TupleGetOp must have vector result type");
+
+      // Update 'tupleIndex' and next defining 'op' to visit.
+      tupleIndex = tupleGetOp.getIndex();
+      op = tupleGetOp.vectors().getDefiningOp();
+    } else if (auto extractSlicesOp = dyn_cast<vector::ExtractSlicesOp>(op)) {
+      assert(tupleIndex >= 0);
+
+      // Compute slice strides for 'extractSlicesOp'.
+      SmallVector<int64_t, 4> sizes;
+      extractSlicesOp.getSizes(sizes);
+      auto sliceStrides = computeStrides(
+          extractSlicesOp.getSourceVectorType().getShape(), sizes);
+
+      // Compute 'elementOffsets' into 'extractSlicesOp' input vector type,
+      // of 'extractSlicesOp' result vector tuple element at 'tupleIndex'.
+      auto vectorOffsets = delinearize(sliceStrides, tupleIndex);
+      auto elementOffsets =
+          computeElementOffsetsFromVectorSliceOffsets(sizes, vectorOffsets);
+
+      // Add 'elementOffsets' to 'offsets' so that 'offsets' are now relative
+      // to the 'extractSlicesOp' input vector type.
+      assert(offsets.size() == elementOffsets.size());
+      for (unsigned i = 0, e = offsets.size(); i < e; ++i)
+        offsets[i] += elementOffsets[i];
+
+      // Clear 'tupleIndex' and update next defining 'op' to visit.
+      tupleIndex = -1;
+      op = extractSlicesOp.vector().getDefiningOp();
+    } else if (auto insertSlicesOp = dyn_cast<vector::InsertSlicesOp>(op)) {
+      assert(tupleIndex == -1);
+
+      // Compute slice strides for 'insertSlicesOp'.
+      SmallVector<int64_t, 4> sizes;
+      insertSlicesOp.getSizes(sizes);
+      auto sliceStrides = computeStrides(
+          insertSlicesOp.getResultVectorType().getShape(), sizes);
+
+      // Compute 'vectorOffsets' of 'insertSlicesOp' input vector slice,
+      // of 'insertSlicesOp' result vector type at 'offsets'.
+      SmallVector<int64_t, 4> vectorOffsets(offsets.size());
+      assert(offsets.size() == sizes.size());
+      for (unsigned i = 0, e = offsets.size(); i < e; ++i)
+        vectorOffsets[i] = offsets[i] / sizes[i];
+
+      // Compute the source tuple element index.
+      tupleIndex = linearize(vectorOffsets, sliceStrides);
+
+      // Subtract 'elementOffsets' from 'offsets' so that 'offsets' are now
+      // relative to input tuple element vector type at 'tupleIndex'.
+      auto elementOffsets =
+          computeElementOffsetsFromVectorSliceOffsets(sizes, vectorOffsets);
+      assert(offsets.size() == elementOffsets.size());
+      for (unsigned i = 0, e = offsets.size(); i < e; ++i) {
+        offsets[i] -= elementOffsets[i];
+        assert(offsets[i] >= 0);
+      }
+
+      // Update next defining 'op' to visit.
+      op = insertSlicesOp.vectors().getDefiningOp();
+    } else if (auto tupleOp = dyn_cast<vector::TupleOp>(op)) {
+      assert(tupleIndex >= 0);
+
+      // Return tuple element 'value' at 'tupleIndex' if it matches type.
+      auto value = tupleOp.getOperand(tupleIndex);
+      if (value.getType() == consumerVectorType)
+        return value;
+
+      // Update 'tupleIndex' and next defining 'op' to visit.
+      tupleIndex = -1;
+      op = value.getDefiningOp();
+    } else if (auto shapeCastOp = dyn_cast<vector::ShapeCastOp>(op)) {
+      if (shapeCastOp.source().getType().isa<TupleType>())
+        return nullptr;
+      assert(tupleIndex == -1);
+      auto sourceVectorType = shapeCastOp.getSourceVectorType();
+      auto sourceVectorShape = sourceVectorType.getShape();
+      unsigned sourceVectorRank = sourceVectorType.getRank();
+      auto resultVectorType = shapeCastOp.getResultVectorType();
+      auto resultVectorShape = resultVectorType.getShape();
+      unsigned resultVectorRank = resultVectorType.getRank();
+
+      int i = sourceVectorRank - 1;
+      int j = resultVectorRank - 1;
+
+      // Check that source/result vector shape prefixes match while updating
+      // 'newOffsets'.
+      SmallVector<int64_t, 4> newOffsets(sourceVectorRank, 0);
+      for (auto it : llvm::zip(llvm::reverse(sourceVectorShape),
+                               llvm::reverse(resultVectorShape))) {
+        if (std::get<0>(it) != std::get<1>(it))
+          return nullptr;
+        newOffsets[i--] = offsets[j--];
+      }
+
+      // Check that remaining prefix of source/result vector shapes are all 1s.
+      // Currently we only support producer/consumer tracking through trivial
+      // shape cast ops. Examples:
+      //   %1 = vector.shape_cast %0 : vector<1x1x2x4xf32> to vector<2x4xf32>
+      //   %3 = vector.shape_cast %2 : vector<16x8xf32> to vector<1x16x8xf32>
+      assert(i == -1 || j == -1);
+      if (i >= 0 &&
+          !std::all_of(sourceVectorShape.begin(), sourceVectorShape.begin() + i,
+                       [](int64_t v) { return v == 1; }))
+        return nullptr;
+      if (j >= 0 &&
+          !std::all_of(resultVectorShape.begin(), resultVectorShape.begin() + j,
+                       [](int64_t v) { return v == 1; }))
+        return nullptr;
+
+      offsets.swap(newOffsets);
+      op = shapeCastOp.source().getDefiningOp();
+    } else {
+      // Check if 'op' produces a Value with the same type as 'consumerValue'.
+      if (op->getNumResults() == 1 &&
+          op->getResult(0).getType() == consumerVectorType)
+        return op->getResult(0);
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
+
 /// ShapeCastOpFolder folds cancelling ShapeCastOps away.
 //
 // Example:
@@ -704,6 +831,12 @@ struct ShapeCastOpFolder : public OpRewritePattern<vector::ShapeCastOp> {
 
   LogicalResult matchAndRewrite(vector::ShapeCastOp shapeCastOp,
                                 PatternRewriter &rewriter) const override {
+    // Check if we can replace 'shapeCastOp' result with its producer.
+    if (auto producer = getProducerValue(shapeCastOp.getResult())) {
+      rewriter.replaceOp(shapeCastOp, producer);
+      return success();
+    }
+
     // Check if 'shapeCastOp' has vector source/result type.
     auto sourceVectorType =
         shapeCastOp.source().getType().dyn_cast_or_null<VectorType>();
@@ -740,28 +873,11 @@ struct TupleGetFolderOp : public OpRewritePattern<vector::TupleGetOp> {
 
   LogicalResult matchAndRewrite(vector::TupleGetOp tupleGetOp,
                                 PatternRewriter &rewriter) const override {
-    // Return if 'tupleGetOp.vectors' arg was not defined by ExtractSlicesOp.
-    auto extractSlicesOp = dyn_cast_or_null<vector::ExtractSlicesOp>(
-        tupleGetOp.vectors().getDefiningOp());
-    if (!extractSlicesOp)
-      return failure();
-
-    // Return if 'extractSlicesOp.vector' arg was not defined by InsertSlicesOp.
-    auto insertSlicesOp = dyn_cast_or_null<vector::InsertSlicesOp>(
-        extractSlicesOp.vector().getDefiningOp());
-    if (!insertSlicesOp)
-      return failure();
-
-    // Return if 'insertSlicesOp.vectors' arg was not defined by TupleOp.
-    auto tupleOp = dyn_cast_or_null<vector::TupleOp>(
-        insertSlicesOp.vectors().getDefiningOp());
-    if (!tupleOp)
-      return failure();
-
-    // Forward Value from 'tupleOp' at 'tupleGetOp.index'.
-    Value tupleValue = tupleOp.getOperand(tupleGetOp.getIndex());
-    rewriter.replaceOp(tupleGetOp, tupleValue);
-    return success();
+    if (auto producer = getProducerValue(tupleGetOp.getResult())) {
+      rewriter.replaceOp(tupleGetOp, producer);
+      return success();
+    }
+    return failure();
   }
 };
 
@@ -866,6 +982,67 @@ public:
 
 /// Progressive lowering of OuterProductOp.
 /// One:
+///   %x = vector.transpose %y, [1, 0]
+/// is replaced by:
+///   %z = constant dense<0.000000e+00>
+///   %0 = vector.extract %y[0, 0]
+///   %1 = vector.insert %0, %z [0, 0]
+///   ..
+///   %x = vector.insert .., .. [.., ..]
+class TransposeOpLowering : public OpRewritePattern<vector::TransposeOp> {
+public:
+  using OpRewritePattern<vector::TransposeOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(vector::TransposeOp op,
+                                PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+
+    VectorType resType = op.getResultType();
+    Type eltType = resType.getElementType();
+
+    // Set up convenience transposition table.
+    SmallVector<int64_t, 4> transp;
+    for (auto attr : op.transp())
+      transp.push_back(attr.cast<IntegerAttr>().getInt());
+
+    // Generate fully unrolled extract/insert ops.
+    Value zero = rewriter.create<ConstantOp>(loc, eltType,
+                                             rewriter.getZeroAttr(eltType));
+    Value result = rewriter.create<SplatOp>(loc, resType, zero);
+    SmallVector<int64_t, 4> lhs(transp.size(), 0);
+    SmallVector<int64_t, 4> rhs(transp.size(), 0);
+    rewriter.replaceOp(op, expandIndices(loc, resType, 0, transp, lhs, rhs,
+                                         op.vector(), result, rewriter));
+    return success();
+  }
+
+private:
+  // Builds the indices arrays for the lhs and rhs. Generates the extract/insert
+  // operation when al ranks are exhausted.
+  Value expandIndices(Location loc, VectorType resType, int64_t pos,
+                      SmallVector<int64_t, 4> &transp,
+                      SmallVector<int64_t, 4> &lhs,
+                      SmallVector<int64_t, 4> &rhs, Value input, Value result,
+                      PatternRewriter &rewriter) const {
+    if (pos >= resType.getRank()) {
+      auto ridx = rewriter.getI64ArrayAttr(rhs);
+      auto lidx = rewriter.getI64ArrayAttr(lhs);
+      Type eltType = resType.getElementType();
+      Value e = rewriter.create<vector::ExtractOp>(loc, eltType, input, ridx);
+      return rewriter.create<vector::InsertOp>(loc, resType, e, result, lidx);
+    }
+    for (int64_t d = 0, e = resType.getDimSize(pos); d < e; ++d) {
+      lhs[pos] = d;
+      rhs[transp[pos]] = d;
+      result = expandIndices(loc, resType, pos + 1, transp, lhs, rhs, input,
+                             result, rewriter);
+    }
+    return result;
+  }
+};
+
+/// Progressive lowering of OuterProductOp.
+/// One:
 ///   %x = vector.outerproduct %lhs, %rhs, %acc
 /// is replaced by:
 ///   %z = zero-result
@@ -942,43 +1119,34 @@ public:
 
     // TODO(ntv, ajcbik): implement benefits, cost models, separate this out in
     // a new pattern.
-    // TODO(ntv, fhahn): once row-major mode is available in LLVM's matrix
-    // intrinsics, use that.
     if (vectorTransformsOptions.lowerToLLVMMatrixIntrinsics &&
-        isColumnMajorMatmul(op.indexing_maps())) {
+        isRowMajorMatmul(op.indexing_maps())) {
       VectorType lhsType = op.getLhsType();
       VectorType rhsType = op.getRhsType();
       unsigned lhsRows = op.getLhsType().getShape()[0];
       unsigned lhsColumns = op.getLhsType().getShape()[1];
       unsigned rhsColumns = op.getRhsType().getShape()[1];
 
-      // In cases where matrices are degenerate, scalarization issues occur in
-      // the backend. Avoid all LLVM scalarization issues for now.
-      // For more details, see: https://bugs.llvm.org/show_bug.cgi?id=45227 and
-      // https://bugs.llvm.org/show_bug.cgi?id=45229
-      // TODO(ntv, fhahn): Relax once above bugs are fixed.
-      if (lhsRows != 1 && lhsColumns != 1 && rhsColumns != 1) {
-        Type flattenedLHSType =
-            VectorType::get(lhsType.getNumElements(), lhsType.getElementType());
-        Type flattenedRHSType =
-            VectorType::get(rhsType.getNumElements(), rhsType.getElementType());
-        auto lhs = rewriter.create<vector::ShapeCastOp>(
-            op.getLoc(), flattenedLHSType, op.lhs());
-        auto rhs = rewriter.create<vector::ShapeCastOp>(
-            op.getLoc(), flattenedRHSType, op.rhs());
+      Type flattenedLHSType =
+          VectorType::get(lhsType.getNumElements(), lhsType.getElementType());
+      Type flattenedRHSType =
+          VectorType::get(rhsType.getNumElements(), rhsType.getElementType());
+      auto lhs = rewriter.create<vector::ShapeCastOp>(
+          op.getLoc(), flattenedLHSType, op.lhs());
+      auto rhs = rewriter.create<vector::ShapeCastOp>(
+          op.getLoc(), flattenedRHSType, op.rhs());
 
-        Value mul = rewriter.create<vector::MatmulOp>(
-            op.getLoc(), lhs, rhs, lhsRows, lhsColumns, rhsColumns);
-        mul = rewriter.create<vector::ShapeCastOp>(op.getLoc(),
-                                                   op.acc().getType(), mul);
-        Type elementType = op.getLhsType().getElementType();
-        assert(elementType.isIntOrFloat());
-        if (elementType.isa<IntegerType>())
-          rewriter.replaceOpWithNewOp<AddIOp>(op, op.acc(), mul);
-        else
-          rewriter.replaceOpWithNewOp<AddFOp>(op, op.acc(), mul);
-        return success();
-      }
+      Value mul = rewriter.create<vector::MatmulOp>(
+          op.getLoc(), lhs, rhs, lhsRows, lhsColumns, rhsColumns);
+      mul = rewriter.create<vector::ShapeCastOp>(op.getLoc(),
+                                                 op.acc().getType(), mul);
+      Type elementType = op.getLhsType().getElementType();
+      assert(elementType.isIntOrFloat());
+      if (elementType.isa<IntegerType>())
+        rewriter.replaceOpWithNewOp<AddIOp>(op, op.acc(), mul);
+      else
+        rewriter.replaceOpWithNewOp<AddFOp>(op, op.acc(), mul);
+      return success();
     }
 
     // Find first batch dimension in LHS/RHS, and lower when found.
@@ -1353,7 +1521,7 @@ void mlir::vector::populateVectorContractLoweringPatterns(
     OwningRewritePatternList &patterns, MLIRContext *context,
     VectorTransformsOptions parameters) {
   patterns.insert<ShapeCastOp2DDownCastRewritePattern,
-                  ShapeCastOp2DUpCastRewritePattern, OuterProductOpLowering>(
-      context);
+                  ShapeCastOp2DUpCastRewritePattern, TransposeOpLowering,
+                  OuterProductOpLowering>(context);
   patterns.insert<ContractionOpLowering>(parameters, context);
 }

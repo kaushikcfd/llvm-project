@@ -12,13 +12,12 @@
 
 #include "mlir/Dialect/Vector/VectorUtils.h"
 #include "mlir/Analysis/LoopAnalysis.h"
-#include "mlir/Dialect/AffineOps/AffineOps.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/Dialect/Vector/VectorOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IntegerSet.h"
 #include "mlir/IR/Operation.h"
-#include "mlir/Support/Functional.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/MathExtras.h"
 #include "mlir/Support/STLExtras.h"
@@ -28,10 +27,10 @@
 
 using llvm::SetVector;
 
-namespace mlir {
+using namespace mlir;
 
-SmallVector<int64_t, 4> computeStrides(ArrayRef<int64_t> shape,
-                                       ArrayRef<int64_t> sizes) {
+SmallVector<int64_t, 4> mlir::computeStrides(ArrayRef<int64_t> shape,
+                                             ArrayRef<int64_t> sizes) {
   int64_t rank = shape.size();
   // Compute the count for each dimension.
   SmallVector<int64_t, 4> sliceDimCounts(rank);
@@ -45,8 +44,16 @@ SmallVector<int64_t, 4> computeStrides(ArrayRef<int64_t> shape,
   return sliceStrides;
 }
 
-SmallVector<int64_t, 4> delinearize(ArrayRef<int64_t> sliceStrides,
-                                    int64_t index) {
+int64_t mlir::linearize(ArrayRef<int64_t> offsets, ArrayRef<int64_t> basis) {
+  assert(offsets.size() == basis.size());
+  int64_t linearIndex = 0;
+  for (unsigned idx = 0, e = basis.size(); idx < e; ++idx)
+    linearIndex += offsets[idx] * basis[idx];
+  return linearIndex;
+}
+
+SmallVector<int64_t, 4> mlir::delinearize(ArrayRef<int64_t> sliceStrides,
+                                          int64_t index) {
   int64_t rank = sliceStrides.size();
   SmallVector<int64_t, 4> vectorOffsets(rank);
   for (int64_t r = 0; r < rank; ++r) {
@@ -57,16 +64,17 @@ SmallVector<int64_t, 4> delinearize(ArrayRef<int64_t> sliceStrides,
   return vectorOffsets;
 }
 
-SmallVector<int64_t, 4>
-computeElementOffsetsFromVectorSliceOffsets(ArrayRef<int64_t> sizes,
-                                            ArrayRef<int64_t> vectorOffsets) {
-  return functional::zipMap([](int64_t v1, int64_t v2) { return v1 * v2; },
-                            vectorOffsets, sizes);
+SmallVector<int64_t, 4> mlir::computeElementOffsetsFromVectorSliceOffsets(
+    ArrayRef<int64_t> sizes, ArrayRef<int64_t> vectorOffsets) {
+  SmallVector<int64_t, 4> result;
+  for (auto it : llvm::zip(vectorOffsets, sizes))
+    result.push_back(std::get<0>(it) * std::get<1>(it));
+  return result;
 }
 
-SmallVector<int64_t, 4> computeSliceSizes(ArrayRef<int64_t> shape,
-                                          ArrayRef<int64_t> sizes,
-                                          ArrayRef<int64_t> elementOffsets) {
+SmallVector<int64_t, 4>
+mlir::computeSliceSizes(ArrayRef<int64_t> shape, ArrayRef<int64_t> sizes,
+                        ArrayRef<int64_t> elementOffsets) {
   int64_t rank = shape.size();
   SmallVector<int64_t, 4> sliceSizes(rank);
   for (unsigned r = 0; r < rank; ++r)
@@ -74,30 +82,26 @@ SmallVector<int64_t, 4> computeSliceSizes(ArrayRef<int64_t> shape,
   return sliceSizes;
 }
 
-Optional<SmallVector<int64_t, 4>> shapeRatio(ArrayRef<int64_t> superShape,
-                                             ArrayRef<int64_t> subShape) {
+Optional<SmallVector<int64_t, 4>> mlir::shapeRatio(ArrayRef<int64_t> superShape,
+                                                   ArrayRef<int64_t> subShape) {
   if (superShape.size() < subShape.size()) {
     return Optional<SmallVector<int64_t, 4>>();
   }
 
   // Starting from the end, compute the integer divisors.
-  // Set the boolean `divides` if integral division is not possible.
   std::vector<int64_t> result;
   result.reserve(superShape.size());
-  bool divides = true;
-  auto divide = [&divides, &result](int superSize, int subSize) {
+  int64_t superSize = 0, subSize = 0;
+  for (auto it :
+       llvm::zip(llvm::reverse(superShape), llvm::reverse(subShape))) {
+    std::tie(superSize, subSize) = it;
     assert(superSize > 0 && "superSize must be > 0");
     assert(subSize > 0 && "subSize must be > 0");
-    divides &= (superSize % subSize == 0);
-    result.push_back(superSize / subSize);
-  };
-  functional::zipApply(
-      divide, SmallVector<int64_t, 8>{superShape.rbegin(), superShape.rend()},
-      SmallVector<int64_t, 8>{subShape.rbegin(), subShape.rend()});
 
-  // If integral division does not occur, return and let the caller decide.
-  if (!divides) {
-    return None;
+    // If integral division does not occur, return and let the caller decide.
+    if (superSize % subSize != 0)
+      return None;
+    result.push_back(superSize / subSize);
   }
 
   // At this point we computed the ratio (in reverse) for the common
@@ -114,8 +118,8 @@ Optional<SmallVector<int64_t, 4>> shapeRatio(ArrayRef<int64_t> superShape,
   return SmallVector<int64_t, 4>{result.rbegin(), result.rend()};
 }
 
-Optional<SmallVector<int64_t, 4>> shapeRatio(VectorType superVectorType,
-                                             VectorType subVectorType) {
+Optional<SmallVector<int64_t, 4>> mlir::shapeRatio(VectorType superVectorType,
+                                                   VectorType subVectorType) {
   assert(superVectorType.getElementType() == subVectorType.getElementType() &&
          "vector types must be of the same elemental type");
   return shapeRatio(superVectorType.getShape(), subVectorType.getShape());
@@ -150,8 +154,6 @@ static AffineMap makePermutationMap(
     return AffineMap();
   MLIRContext *context =
       enclosingLoopToVectorDim.begin()->getFirst()->getContext();
-  using functional::makePtrDynCaster;
-  using functional::map;
   SmallVector<AffineExpr, 4> perm(enclosingLoopToVectorDim.size(),
                                   getAffineConstantExpr(0, context));
 
@@ -201,9 +203,9 @@ static SetVector<Operation *> getEnclosingforOps(Operation *op) {
   return getParentsOfType<AffineForOp>(op);
 }
 
-AffineMap
-makePermutationMap(Operation *op, ArrayRef<Value> indices,
-                   const DenseMap<Operation *, unsigned> &loopToVectorDim) {
+AffineMap mlir::makePermutationMap(
+    Operation *op, ArrayRef<Value> indices,
+    const DenseMap<Operation *, unsigned> &loopToVectorDim) {
   DenseMap<Operation *, unsigned> enclosingLoopToVectorDim;
   auto enclosingLoops = getEnclosingforOps(op);
   for (auto *forInst : enclosingLoops) {
@@ -212,7 +214,7 @@ makePermutationMap(Operation *op, ArrayRef<Value> indices,
       enclosingLoopToVectorDim.insert(*it);
     }
   }
-  return makePermutationMap(indices, enclosingLoopToVectorDim);
+  return ::makePermutationMap(indices, enclosingLoopToVectorDim);
 }
 
 bool matcher::operatesOnSuperVectorsOf(Operation &op,
@@ -275,4 +277,3 @@ bool matcher::operatesOnSuperVectorsOf(Operation &op,
   return true;
 }
 
-} // namespace mlir

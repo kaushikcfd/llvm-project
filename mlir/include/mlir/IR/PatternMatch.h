@@ -131,6 +131,12 @@ public:
     return failure();
   }
 
+  /// Returns true if this pattern is known to result in recursive application,
+  /// i.e. this pattern may generate IR that also matches this pattern, but is
+  /// known to bound the recursion. This signals to a rewriter that it is safe
+  /// to apply this pattern recursively to generated IR.
+  virtual bool hasBoundedRewriteRecursion() const { return false; }
+
   /// Return a list of operations that may be generated when rewriting an
   /// operation instance with this pattern.
   ArrayRef<OperationName> getGeneratedOps() const { return generatedOps; }
@@ -280,6 +286,9 @@ public:
   /// This method erases an operation that is known to have no uses.
   virtual void eraseOp(Operation *op);
 
+  /// This method erases all operations in a block.
+  virtual void eraseBlock(Block *block);
+
   /// Merge the operations of block 'source' into the end of block 'dest'.
   /// 'source's predecessors must either be empty or only contain 'dest`.
   /// 'argValues' is used to replace the block arguments of 'source' after
@@ -322,10 +331,15 @@ public:
   /// why the failure occurred. This method allows for derived rewriters to
   /// optionally hook into the reason why a pattern failed, and display it to
   /// users.
-  virtual LogicalResult
-  notifyMatchFailure(Operation *op,
-                     function_ref<void(Diagnostic &)> reasonCallback) {
+  template <typename CallbackT>
+  std::enable_if_t<!std::is_convertible<CallbackT, Twine>::value, LogicalResult>
+  notifyMatchFailure(Operation *op, CallbackT &&reasonCallback) {
+#ifndef NDEBUG
+    return notifyMatchFailure(op,
+                              function_ref<void(Diagnostic &)>(reasonCallback));
+#else
     return failure();
+#endif
   }
   LogicalResult notifyMatchFailure(Operation *op, const Twine &msg) {
     return notifyMatchFailure(op, [&](Diagnostic &diag) { diag << msg; });
@@ -350,6 +364,17 @@ protected:
   /// before the operation is deleted.  At this point, the operation has zero
   /// uses.
   virtual void notifyOperationRemoved(Operation *op) {}
+
+  /// Notify the pattern rewriter that the pattern is failing to match the given
+  /// operation, and provide a callback to populate a diagnostic with the reason
+  /// why the failure occurred. This method allows for derived rewriters to
+  /// optionally hook into the reason why a pattern failed, and display it to
+  /// users.
+  virtual LogicalResult
+  notifyMatchFailure(Operation *op,
+                     function_ref<void(Diagnostic &)> reasonCallback) {
+    return failure();
+  }
 
 private:
   /// 'op' and 'newOp' are known to have the same number of results, replace the
@@ -425,11 +450,11 @@ private:
 /// Note: These methods also perform folding and simple dead-code elimination
 ///       before attempting to match any of the provided patterns.
 ///
-bool applyPatternsGreedily(Operation *op,
-                           const OwningRewritePatternList &patterns);
+bool applyPatternsAndFoldGreedily(Operation *op,
+                                  const OwningRewritePatternList &patterns);
 /// Rewrite the given regions, which must be isolated from above.
-bool applyPatternsGreedily(MutableArrayRef<Region> regions,
-                           const OwningRewritePatternList &patterns);
+bool applyPatternsAndFoldGreedily(MutableArrayRef<Region> regions,
+                                  const OwningRewritePatternList &patterns);
 } // end namespace mlir
 
 #endif // MLIR_PATTERN_MATCH_H

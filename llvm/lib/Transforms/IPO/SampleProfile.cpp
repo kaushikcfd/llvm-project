@@ -46,7 +46,6 @@
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
-#include "llvm/IR/CallSite.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/DiagnosticInfo.h"
@@ -236,7 +235,7 @@ public:
                         DenseMap<uint64_t, StringRef> &GUIDToFuncNameMap)
       : CurrentReader(Reader), CurrentModule(M),
       CurrentGUIDToFuncNameMap(GUIDToFuncNameMap) {
-    if (CurrentReader.getFormat() != SPF_Compact_Binary)
+    if (!CurrentReader.useMD5())
       return;
 
     for (const auto &F : CurrentModule) {
@@ -262,7 +261,7 @@ public:
   }
 
   ~GUIDToFuncNameMapper() {
-    if (CurrentReader.getFormat() != SPF_Compact_Binary)
+    if (!CurrentReader.useMD5())
       return;
 
     CurrentGUIDToFuncNameMap.clear();
@@ -984,6 +983,8 @@ bool SampleProfileLoader::inlineHotFunctions(
          "ProfAccForSymsInList should be false when profile-sample-accurate "
          "is enabled");
 
+  // FIXME(CallSite): refactor the vectors here, as they operate with CallBase
+  // values
   DenseMap<Instruction *, const FunctionSamples *> localNotInlinedCallSites;
   bool Changed = false;
   while (true) {
@@ -1047,7 +1048,7 @@ bool SampleProfileLoader::inlineHotFunctions(
           if (R != SymbolMap.end() && R->getValue() &&
               !R->getValue()->isDeclaration() &&
               R->getValue()->getSubprogram() &&
-              isLegalToPromote(CallSite(I), R->getValue(), &Reason)) {
+              isLegalToPromote(*cast<CallBase>(I), R->getValue(), &Reason)) {
             uint64_t C = FS->getEntrySamples();
             Instruction *DI =
                 pgo::promoteIndirectCall(I, R->getValue(), C, Sum, false, ORE);

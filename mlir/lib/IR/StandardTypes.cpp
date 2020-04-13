@@ -86,6 +86,8 @@ bool Type::isSignlessIntOrFloat() {
 
 bool Type::isIntOrFloat() { return isa<IntegerType>() || isa<FloatType>(); }
 
+bool Type::isIntOrIndexOrFloat() { return isIntOrFloat() || isIndex(); }
+
 //===----------------------------------------------------------------------===//
 // Integer Type
 //===----------------------------------------------------------------------===//
@@ -101,8 +103,6 @@ IntegerType::verifyConstructionInvariants(Location loc, unsigned width,
     return emitError(loc) << "integer bitwidth is limited to "
                           << IntegerType::kMaxWidth << " bits";
   }
-  if (width == 1 && signedness != IntegerType::Signless)
-    return emitOptionalError(loc, "cannot have signedness semantics for i1");
   return success();
 }
 
@@ -182,9 +182,14 @@ int64_t ShapedType::getRank() const { return getShape().size(); }
 
 bool ShapedType::hasRank() const { return !isa<UnrankedTensorType>(); }
 
-int64_t ShapedType::getDimSize(int64_t i) const {
-  assert(i >= 0 && i < getRank() && "invalid index for shaped type");
-  return getShape()[i];
+int64_t ShapedType::getDimSize(unsigned idx) const {
+  assert(idx < getRank() && "invalid index for shaped type");
+  return getShape()[idx];
+}
+
+bool ShapedType::isDynamicDim(unsigned idx) const {
+  assert(idx < getRank() && "invalid index for shaped type");
+  return isDynamic(getShape()[idx]);
 }
 
 unsigned ShapedType::getDynamicDimIndex(unsigned index) const {
