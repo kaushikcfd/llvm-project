@@ -6,3 +6,45 @@
   - how do passes/analyses get applied
     - are they dependent on the dialect we choose? 
 - Email on April 1, updating the status.
+
+
+* <2020-04-15 Wed>
+** KK: Current progress
+1. Lowered a mat-mat kernel to llvm.
+  - Just take a look at
+  [[https://github.com/bondhugula/llvm-project/blob/b38e999ba86565a1251bc68f5c8c3722e39a7466/mlir/docs/HighPerfCodeGen.md#affine-ops][this]].
+  - To lower to llvm: ~mlir-opt -lower-affine --convert-loop-to-std -convert-std-to-llvm filename.mlir~
+2. Working on:
+#+BEGIN_SRC
+llvm.mlir.global constant @str("%f\n") : !llvm<"[3 x i8]">
+
+func @try_something_affine() {
+  %a = alloc() : memref<4x4xf64>
+  call @print_memref_2d_f64(%a) : (memref<4x4xf64>)->()
+  return
+}
+
+
+func @main() {
+  call @try_something_affine() : ()->()
+  return
+}
+
+llvm.func @printf(!llvm<"i8*">, ...) -> !llvm.i32
+
+
+func @print_memref_2d_f64(%A: memref<4x4xf64>) {
+  %0 = llvm.mlir.addressof @str : !llvm<"[3 x i8]*">
+  %1 = llvm.mlir.constant(0 : i32) : !llvm.i32
+
+  affine.for %i = 0 to 4 {
+    affine.for %j = 0 to 4 {
+      %2 = llvm.getelementptr %0[%1] : (!llvm<"[3 x i8]*">, !llvm.i32) -> !llvm<"i8*">
+      %3 = affine.load %A[%i, %j] : memref<4x4xf64>
+      llvm.call @printf(%2, %3) : (!llvm<"i8*">, f64) -> !llvm.i32
+    }
+  }
+}
+#+END_SRC
+It is unhappy about passing f64 to an llvm call.
+
