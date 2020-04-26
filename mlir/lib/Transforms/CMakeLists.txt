@@ -2,6 +2,7 @@ add_subdirectory(Utils)
 
 add_mlir_library(MLIRTransforms
   Canonicalizer.cpp
+  CS526ArrayDependenceAnalysis.cpp
   CSE.cpp
   DialectConversion.cpp
   Inliner.cpp
