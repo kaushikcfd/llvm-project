@@ -25,11 +25,74 @@ using namespace mlir;
 
 
 namespace {
+
+
+template <typename T>
+using Matrix = vector<vector<T>>;
+
+
+template <typename T>
+static Matrix<T> createMatrix(size_t N) {
+  Matrix<T> result(N, vector<T>(N));
+  return result;
+}
+
+
+
+
+static void printMatrix(Matrix<short> R, vector<Op> affineLoadsStores) {
+  // @TODO: Assign names to rows columsn
+  return;
+}
+
+
+/*
+ * Implments the ZIV test for a function.
+ *
+ * Walks through all the given loads and stores, and checks for dependencies
+ * for each pair.
+ *
+ * Prints a dense matrix 'R' where:
+ * 
+ * Rij =  1    if Opi and Opj access the same memory
+ * Rij = -1    if Opi and Opj do not access the same memory
+ * Rij =  0    if we are unable to ascertain the above 2 conditions on the
+ *             memory accessed by Opi, Opj
+ */
+void printZIVResults(vector<Op> affineLoadsStores) {
+  auto R = createMatrix<short>(affineLoadsStores.size());
+  printMatrix(R);
+}
+
+
+
 struct CS526ArrayDependenceAnalysis : public PassWrapper<CS526ArrayDependenceAnalysis, FunctionPass> {
   void runOnFunction() override {
-    //TODO: Insert something here...
-    // I think getFunction() gets us the function..
-    llvm::dbgs() << "Hello World!!\n";
+
+    FuncOp func = getFunction();
+    llvm::dbgs() << "================================================================\n";
+    llvm::dbgs() << "And the function of interest is -- \n";
+    func.print(llvm::dbgs());
+    llvm::dbgs() << "\n";
+    llvm::dbgs() << "================================================================\n";
+
+    llvm::dbgs() << "Printing all the loads and stores in the functions:\n";
+
+    func.walk([&](Operation *op) {
+      if (isa<AffineLoadOp>(op) || isa<AffineStoreOp>(op)) {
+        op->print(llvm::dbgs());
+        Location loc = op->getLoc();
+        if (auto fileLineCol = loc.dyn_cast<FileLineColLoc>()) {
+          llvm::dbgs() << " ; On line " << fileLineCol.getLine();
+        }
+        else {
+          lvm::dbgs() << "Unkown loc.";
+        }
+        llvm::dbgs() << "\n";
+      }
+    });
+    llvm::dbgs() << "================================================================\n";
+
   }
 
 };
