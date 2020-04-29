@@ -45,7 +45,6 @@ static Matrix<T> createMatrix(size_t N) {
 }
 
 static void printMatrix(Matrix<short> R, std::vector<Operation*> affineLoadsStores) {
-  // @TODO: Assign names to rows columsn
   int N = affineLoadsStores.size();
 
   const int cellWidth = 6;
@@ -142,6 +141,32 @@ static void printMatrix(Matrix<short> R, std::vector<Operation*> affineLoadsStor
 }
 
 
+static short zivCompareAffineMaps(AffineMap map1, AffineMap map2) {
+  assert(map1.getNumResults() == map2.getNumResults());
+
+  SmallVector<int64_t, 2> map1Indices, map2Indices;
+
+  for (AffineExpr expr : map1.getResults()) {
+    if (auto constAffine = expr.dyn_cast<AffineConstantExpr>())
+      map1Indices.push_back(constAffine.getValue());
+    else
+      return 0;
+  }
+
+  int iDim = 0;
+
+  for (AffineExpr expr : map2.getResults()) {
+    if (auto constAffine = expr.dyn_cast<AffineConstantExpr>()) {
+      if (constAffine.getValue() != map1Indices[iDim++])
+        return -1;
+    }
+    else
+      return 0;
+  }
+
+  return 1;
+}
+
 /*
  * Implments the ZIV test for a function.
  *
@@ -158,7 +183,43 @@ static void printMatrix(Matrix<short> R, std::vector<Operation*> affineLoadsStor
 void printZIVResults(std::vector<Operation*> affineLoadsStores) {
   int N = affineLoadsStores.size();
   auto R = createMatrix<short>(N);
-  // TODO: compute the dependencies here...
+
+  auto getMemref = [](Operation* Op) {
+    if (auto load = dyn_cast<AffineLoadOp>(Op))
+      return load.getMemRef();
+    auto store = dyn_cast<AffineStoreOp>(Op);
+    assert(store && "Op should be either load or store");
+    return store.getMemRef();
+  };
+
+  auto getAffineMap = [](Operation* Op) {
+    if (auto load = dyn_cast<AffineLoadOp>(Op))
+      return load.getAffineMap();
+    auto store = dyn_cast<AffineStoreOp>(Op);
+    assert(store && "Op should be either load or store");
+    return store.getAffineMap();
+  };
+
+  
+  for (int i=0; i < N; ++i) {
+    Operation* OpI = affineLoadsStores[i];
+    Value memrefI = getMemref(OpI);
+    AffineMap affineMapI = getAffineMap(OpI);
+    for (int j=0; j < N; ++j) {
+      Operation* OpJ = affineLoadsStores[j];
+      Value memrefJ = getMemref(OpJ);
+      AffineMap affineMapJ = getAffineMap(OpJ);
+      if (i == 0) {
+        llvm::dbgs() << "AffineMap[" << j << "]: "<< affineMapJ << "\n";
+      }
+
+      if (memrefI == memrefJ)
+        R[i][j] = zivCompareAffineMaps(affineMapI, affineMapJ);
+      else
+        R[i][j] = -1;
+    }
+  }
+  
   printMatrix(R, affineLoadsStores);
 }
 
@@ -191,3 +252,5 @@ void CS526ArrayDependenceAnalysis::runOnFunction() {
 PassRegistration<CS526ArrayDependenceAnalysis> pass(
       "cs526-array-dep-analysis",
       "[CS526]: Check dependencies of all memrefs");
+
+// vim:foldmethod=marker
