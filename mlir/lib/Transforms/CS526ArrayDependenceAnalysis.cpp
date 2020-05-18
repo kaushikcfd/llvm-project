@@ -14,6 +14,7 @@
 #include "mlir/Analysis/AffineStructures.h"
 #include "mlir/Analysis/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Affine/IR/AffineValueMap.h"
 #include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
@@ -141,6 +142,27 @@ static void printMatrix(Matrix<short> R, std::vector<Operation*> affineLoadsStor
 }
 
 
+
+static int64_t computeGCD(int64_t n1, int64_t n2) {
+    if (n2 != 0)
+        return computeGCD(n2, n1 % n2);
+    else
+        return n1;
+}
+
+
+static int64_t computeGCD(SmallVectorImpl<int64_t>* vec) {
+  assert(vec->size() > 0);
+
+  int64_t gcd = (*vec)[0];
+  for (unsigned i=1; i < vec->size(); ++i)
+    gcd = computeGCD(gcd, (*vec)[i]);
+
+  return gcd;
+}
+
+// {{{ ZIV
+
 static short zivCompareAffineMaps(AffineMap map1, AffineMap map2) {
   assert(map1.getNumResults() == map2.getNumResults());
 
@@ -200,7 +222,6 @@ void printZIVResults(std::vector<Operation*> affineLoadsStores) {
     return store.getAffineMap();
   };
 
-  
   for (int i=0; i < N; ++i) {
     Operation* OpI = affineLoadsStores[i];
     Value memrefI = getMemref(OpI);
@@ -209,9 +230,6 @@ void printZIVResults(std::vector<Operation*> affineLoadsStores) {
       Operation* OpJ = affineLoadsStores[j];
       Value memrefJ = getMemref(OpJ);
       AffineMap affineMapJ = getAffineMap(OpJ);
-      if (i == 0) {
-        llvm::dbgs() << "AffineMap[" << j << "]: "<< affineMapJ << "\n";
-      }
 
       if (memrefI == memrefJ)
         R[i][j] = zivCompareAffineMaps(affineMapI, affineMapJ);
@@ -221,16 +239,170 @@ void printZIVResults(std::vector<Operation*> affineLoadsStores) {
   }
   
   printMatrix(R, affineLoadsStores);
+  llvm::dbgs() << "\n\n";
 }
+
+// }}}
+
+
+
+/*
+ * Returns:
+ *  1  if map1 and map2 have an intersection according to GCD test.
+ * -1  if map1 and map2 do not have an intersection according to GCD test.
+ *  0  if GCD test fails.
+ */
+static short gcdTestCompareAffineMaps(AffineMap map1, AffineMap map2) {
+  assert(map1.getNumResults() == map2.getNumResults());
+
+  int NResults = map1.getNumResults();
+
+  /// affineCoeffs[i]: contains all the linear indices for the i-th result
+  /// dimension
+  /// For example:
+  /// A[2*i+3*j +4, 5*i + 7*j, 8] will have affineCoeffs = [[2, 3], [5, 7], []]
+  SmallVector<SmallVector<int64_t, 2>, 3> affineCoeffs(NResults);
+
+  /// b0minusa0 contains the difference of the constant terms between map1 and
+  /// map2.
+  /// A[2*i+3*j +4, 5*i + 7*j, 8], B[3*i+7, 8, 2*j+9] will have b0minusa0 as
+  /// [3, 8, 1]
+  SmallVector<int64_t, 3> b0minusa0Vec(NResults, 0);
+
+
+  for(int iResult=0; iResult < NResults; ++iResult) {
+    AffineExpr map1Result = map1.getResult(iResult);
+    AffineExpr map2Result = map2.getResult(iResult);
+
+    SmallVector<int64_t, 3> map1ResultFlattenedExpr, map2ResultFlattenedExpr;
+
+    if (failed(
+          getFlattenedAffineExpr(
+            map1Result, map1.getNumDims(), map1.getNumSymbols(), &map1ResultFlattenedExpr))) {
+      llvm::dbgs() << "Failed expression flattening for " << map1Result << "\n";
+      return 0;
+    }
+
+    if (failed(
+          getFlattenedAffineExpr(
+            map2Result, map2.getNumDims(), map2.getNumSymbols(), &map2ResultFlattenedExpr))) {
+      llvm::dbgs() << "Failed expression flattening for " << map2Result << "\n";
+      return 0;
+    }
+
+    for (unsigned iDim=0; iDim < map1.getNumDims(); ++iDim) {
+      int64_t affineCoeff = map1ResultFlattenedExpr[iDim];
+      if (affineCoeff != 0)
+        affineCoeffs[iResult].push_back(abs(affineCoeff));
+    }
+
+    for (unsigned iDim=0; iDim < map2.getNumDims(); ++iDim) {
+      int64_t affineCoeff = map2ResultFlattenedExpr[iDim];
+      if (affineCoeff != 0)
+        affineCoeffs[iResult].push_back(abs(affineCoeff));
+    }
+
+    b0minusa0Vec[iResult] = abs(
+        map1ResultFlattenedExpr[map1.getNumDims()] - map2ResultFlattenedExpr[map2.getNumDims()]);
+  }
+
+  LLVM_DEBUG(
+    llvm::dbgs() << "Performing GCD test of '" << map1 << "' and '" << map2 << "'.\n";
+
+    llvm::dbgs() << "Need to take gcd of the list: [";
+    for (auto k1 : affineCoeffs) {
+      llvm::dbgs() << "[";
+      for (auto k2 : k1) {
+        llvm::dbgs() << k2 << ", ";
+      }
+      llvm::dbgs() << "], ";
+    }
+
+    llvm::dbgs() << "]\n";
+
+    llvm::dbgs() << "b0 - a0 = [";
+    for (auto k1 : b0minusa0Vec) {
+      llvm::dbgs() << k1 << ", ";
+    }
+
+    llvm::dbgs() << "]\n";);
+
+
+  int iResult = 0;
+
+  for(auto affineCoeff : affineCoeffs) {
+    int64_t b0Minusa0 = b0minusa0Vec[iResult++];
+    if (affineCoeff.size() == 0) {
+      // ZIV
+      if (b0Minusa0 != 0) {
+        LLVM_DEBUG(llvm::dbgs() << "GCD Test returned -1 for a ZIV.\n");
+        return -1;
+      }
+      continue;
+    }
+    // MIV
+    int64_t gcd = computeGCD(&affineCoeff);
+    if ((b0Minusa0 % gcd) != 0) {
+      LLVM_DEBUG(llvm::dbgs() << "GCD Test returned -1.\n");
+      return -1;
+    }
+  }
+
+  LLVM_DEBUG(llvm::dbgs() << "GCD Test returned 1.\n");
+
+  return 1;
+}
+
+
+/*
+ * Implements the GCD test.
+ */
+
+void printGCDTestResults(std::vector<Operation*> affineLoadsStores) {
+  int N = affineLoadsStores.size();
+  auto R = createMatrix<short>(N);
+
+  auto getMemref = [](Operation* Op) {
+    if (auto load = dyn_cast<AffineLoadOp>(Op))
+      return load.getMemRef();
+    auto store = dyn_cast<AffineStoreOp>(Op);
+    assert(store && "Op should be either load or store");
+    return store.getMemRef();
+  };
+
+  auto getAffineMap = [](Operation* Op) {
+    if (auto load = dyn_cast<AffineLoadOp>(Op))
+      return load.getAffineMap();
+    auto store = dyn_cast<AffineStoreOp>(Op);
+    assert(store && "Op should be either load or store");
+    return store.getAffineMap();
+  };
+
+  for (int i=0; i < N; ++i) {
+    Operation* OpI = affineLoadsStores[i];
+    Value memrefI = getMemref(OpI);
+    AffineMap affineMapI = getAffineMap(OpI);
+    for (int j=0; j < N; ++j) {
+      Operation* OpJ = affineLoadsStores[j];
+      Value memrefJ = getMemref(OpJ);
+      AffineMap affineMapJ = getAffineMap(OpJ);
+
+      if (memrefI == memrefJ)
+        R[i][j] = gcdTestCompareAffineMaps(affineMapI, affineMapJ);
+      else
+        // TODO: assumming memrefs do not alias each other.
+        R[i][j] = -1;
+    }
+  }
+
+  printMatrix(R, affineLoadsStores);
+  llvm::dbgs() << "\n\n";
+}
+
 
 
 void CS526ArrayDependenceAnalysis::runOnFunction() {
   FuncOp func = getFunction();
-  llvm::dbgs() << "================================================================\n";
-  llvm::dbgs() << "And the function of interest is -- \n";
-  func.print(llvm::dbgs());
-  llvm::dbgs() << "\n";
-  llvm::dbgs() << "================================================================\n";
 
   std::vector<Operation*> affineLoadsStores;
 
@@ -241,9 +413,8 @@ void CS526ArrayDependenceAnalysis::runOnFunction() {
     }
   });
 
-  llvm::dbgs() << "Pretty printing out table:\n";
-  printZIVResults(affineLoadsStores);
-  llvm::dbgs() << "================================================================\n";
+  // printZIVResults(affineLoadsStores);
+  printGCDTestResults(affineLoadsStores);
 }
 
 
