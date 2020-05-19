@@ -1,3 +1,5 @@
+// Loosely based on: https://github.com/bondhugula/llvm-project/blob/b38e999ba86565a1251bc68f5c8c3722e39a7466/mlir/docs/HighPerfCodeGen.md#affine-ops
+
 func @matmul(%A: memref<2048x2048xf64>, %B: memref<2048x2048xf64>, %C: memref<2048x2048xf64>) {
   affine.for %arg3 = 0 to 2048 {
     affine.for %arg4 = 0 to 2048 {

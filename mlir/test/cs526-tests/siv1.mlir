@@ -31,3 +31,5 @@ func @siv1(%W: memref<100x100xf32>, %X: memref<100x100xf32>, %Y: memref<100x100x
 //| L18 |  -1 |   1 |   1 |  -1 |
 //| S19 |  -1 |  -1 |  -1 |   1 |
 //|-----+-----+-----+-----+-----|
+
+// Based on: http://misailo.web.engr.illinois.edu/courses/526-sp20/lec6.pdf

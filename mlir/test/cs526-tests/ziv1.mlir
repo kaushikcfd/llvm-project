@@ -22,3 +22,5 @@ func @ziv1(%A: memref<10x10xf32>, %B: memref<10xf32>, %C: memref<10x10x10xf32>) 
 // | L10 |    |    |    | T   | F   |
 // | S11 |    |    |    |     | T   |
 // |-----+----+----+----+-----+-----|
+
+// Based on http://misailo.web.engr.illinois.edu/courses/526-sp20/lec6.pdf
