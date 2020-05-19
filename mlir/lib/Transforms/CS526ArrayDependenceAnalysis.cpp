@@ -1,6 +1,6 @@
 //===- CS526ArrayDependenceAnalysis.cpp -Array dep analysis ------------------===//
 //
-// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// Licensed under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
@@ -203,6 +203,7 @@ static short zivCompareAffineMaps(AffineMap map1, AffineMap map2) {
  *             memory accessed by Opi, Opj
  */
 void printZIVResults(std::vector<Operation*> affineLoadsStores) {
+  int numPairSuccesses = 0;
   int N = affineLoadsStores.size();
   auto R = createMatrix<short>(N);
 
@@ -235,10 +236,14 @@ void printZIVResults(std::vector<Operation*> affineLoadsStores) {
         R[i][j] = zivCompareAffineMaps(affineMapI, affineMapJ);
       else
         R[i][j] = -1;
+
+      if (R[i][j] != 0)
+        ++numPairSuccesses;
     }
   }
   
   printMatrix(R, affineLoadsStores);
+  llvm::dbgs() << "\% Access pairs analyzed: " << (100.0*numPairSuccesses)/(1.0*N*N) << "\n";
   llvm::dbgs() << "\n\n";
 }
 
@@ -359,6 +364,7 @@ static short gcdTestCompareAffineMaps(AffineMap map1, AffineMap map2) {
  */
 
 void printGCDTestResults(std::vector<Operation*> affineLoadsStores) {
+  int numPairSuccesses = 0;
   int N = affineLoadsStores.size();
   auto R = createMatrix<short>(N);
 
@@ -392,10 +398,15 @@ void printGCDTestResults(std::vector<Operation*> affineLoadsStores) {
       else
         // TODO: assumming memrefs do not alias each other.
         R[i][j] = -1;
+
+      if (R[i][j] != 0)
+        ++numPairSuccesses;
+
     }
   }
 
   printMatrix(R, affineLoadsStores);
+  llvm::dbgs() << "\% Access pairs analyzed: " << (100.0*numPairSuccesses)/(1.0*N*N) << "\n";
   llvm::dbgs() << "\n\n";
 }
 
