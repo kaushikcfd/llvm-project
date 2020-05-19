@@ -1,3 +1,4 @@
+// Inspired by http://tensor-compiler.org/docs/data_analytics/
 // A[i,j] = B[i,k,l] * D[l,j] * C[k,j]
 
 func @mttkrp(%A: memref<128x256xf64>, %B: memref<128x64x32xf64>, %C: memref<64x256xf64>, %D: memref<32x256xf64>) {
